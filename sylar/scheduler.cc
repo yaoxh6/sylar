@@ -1,13 +1,14 @@
 #include "scheduler.h"
 #include "log.h"
 #include "macro.h"
+#include "hook.h"
 
 namespace sylar {
 
 static sylar::Logger::ptr g_logger = SYLAR_LOG_NAME("system");
 
 static thread_local Scheduler* t_scheduler = nullptr;
-static thread_local Fiber* t_fiber = nullptr;
+static thread_local Fiber* t_scheduler_fiber = nullptr;
 
 Scheduler::Scheduler(size_t threads, bool use_caller, const std::string& name)
     :m_name(name) {
@@ -23,7 +24,7 @@ Scheduler::Scheduler(size_t threads, bool use_caller, const std::string& name)
         m_rootFiber.reset(new Fiber(std::bind(&Scheduler::run, this), 0, true));
         sylar::Thread::SetName(m_name);
 
-        t_fiber = m_rootFiber.get();
+        t_scheduler_fiber = m_rootFiber.get();
         m_rootThread = sylar::GetThreadId();
         m_threadIds.push_back(m_rootThread);
     } else {
@@ -44,7 +45,7 @@ Scheduler* Scheduler::GetThis() {
 }
 
 Fiber* Scheduler::GetMainFiber() {
-    return t_fiber;
+    return t_scheduler_fiber;
 }
 
 void Scheduler::start() {
@@ -133,10 +134,11 @@ void Scheduler::setThis() {
 }
 
 void Scheduler::run() {
-    SYLAR_LOG_INFO(g_logger) << "run";
+    SYLAR_LOG_DEBUG(g_logger) << m_name << " run";
+    set_hook_enable(true);
     setThis();
     if(sylar::GetThreadId() != m_rootThread) {
-        t_fiber = Fiber::GetThis().get();
+        t_scheduler_fiber = Fiber::GetThis().get();
     }
 
     Fiber::ptr idle_fiber(new Fiber(std::bind(&Scheduler::idle, this)));
@@ -164,11 +166,12 @@ void Scheduler::run() {
                 }
 
                 ft = *it;
-                m_fibers.erase(it);
+                m_fibers.erase(it++);
                 ++m_activeThreadCount;
                 is_active = true;
                 break;
             }
+            tickle_me |= it != m_fibers.end();
         }
 
         if(tickle_me) {
@@ -241,6 +244,46 @@ void Scheduler::idle() {
     SYLAR_LOG_INFO(g_logger) << "idle";
     while(!stopping()) {
         sylar::Fiber::YieldToHold();
+    }
+}
+
+void Scheduler::switchTo(int thread) {
+    SYLAR_ASSERT(Scheduler::GetThis() != nullptr);
+    if(Scheduler::GetThis() == this) {
+        if(thread == -1 || thread == sylar::GetThreadId()) {
+            return;
+        }
+    }
+    schedule(Fiber::GetThis(), thread);
+    Fiber::YieldToHold();
+}
+
+std::ostream& Scheduler::dump(std::ostream& os) {
+    os << "[Scheduler name=" << m_name
+       << " size=" << m_threadCount
+       << " active_count=" << m_activeThreadCount
+       << " idle_count=" << m_idleThreadCount
+       << " stopping=" << m_stopping
+       << " ]" << std::endl << "    ";
+    for(size_t i = 0; i < m_threadIds.size(); ++i) {
+        if(i) {
+            os << ", ";
+        }
+        os << m_threadIds[i];
+    }
+    return os;
+}
+
+SchedulerSwitcher::SchedulerSwitcher(Scheduler* target) {
+    m_caller = Scheduler::GetThis();
+    if(target) {
+        target->switchTo();
+    }
+}
+
+SchedulerSwitcher::~SchedulerSwitcher() {
+    if(m_caller) {
+        m_caller->switchTo();
     }
 }
 

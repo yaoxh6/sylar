@@ -16,7 +16,7 @@ static thread_local Fiber* t_fiber = nullptr;
 static thread_local Fiber::ptr t_threadFiber = nullptr;
 
 static ConfigVar<uint32_t>::ptr g_fiber_stack_size =
-    Config::Lookup<uint32_t>("fiber.stack_size", 1024 * 1024, "fiber stack size");
+    Config::Lookup<uint32_t>("fiber.stack_size", 128 * 1024, "fiber stack size");
 
 class MallocStackAllocator {
 public:
@@ -48,7 +48,7 @@ Fiber::Fiber() {
 
     ++s_fiber_count;
 
-    SYLAR_LOG_DEBUG(g_logger) << "Fiber::Fiber";
+    SYLAR_LOG_DEBUG(g_logger) << "Fiber::Fiber main";
 }
 
 Fiber::Fiber(std::function<void()> cb, size_t stacksize, bool use_caller)
@@ -91,11 +91,12 @@ Fiber::~Fiber() {
             SetThis(nullptr);
         }
     }
-    SYLAR_LOG_DEBUG(g_logger) << "Fiber::~Fiber id=" << m_id;
+    SYLAR_LOG_DEBUG(g_logger) << "Fiber::~Fiber id=" << m_id
+                              << " total=" << s_fiber_count;
 }
 
 //重置协程函数，并重置状态
-//INIT，TERM
+//INIT，TERM, EXCEPT
 void Fiber::reset(std::function<void()> cb) {
     SYLAR_ASSERT(m_stack);
     SYLAR_ASSERT(m_state == TERM
@@ -117,7 +118,6 @@ void Fiber::reset(std::function<void()> cb) {
 void Fiber::call() {
     SetThis(this);
     m_state = EXEC;
-    SYLAR_LOG_ERROR(g_logger) << getId();
     if(swapcontext(&t_threadFiber->m_ctx, &m_ctx)) {
         SYLAR_ASSERT2(false, "swapcontext");
     }
@@ -167,6 +167,7 @@ Fiber::ptr Fiber::GetThis() {
 //协程切换到后台，并且设置为Ready状态
 void Fiber::YieldToReady() {
     Fiber::ptr cur = GetThis();
+    SYLAR_ASSERT(cur->m_state == EXEC);
     cur->m_state = READY;
     cur->swapOut();
 }
@@ -174,7 +175,8 @@ void Fiber::YieldToReady() {
 //协程切换到后台，并且设置为Hold状态
 void Fiber::YieldToHold() {
     Fiber::ptr cur = GetThis();
-    cur->m_state = HOLD;
+    SYLAR_ASSERT(cur->m_state == EXEC);
+    //cur->m_state = HOLD;
     cur->swapOut();
 }
 
